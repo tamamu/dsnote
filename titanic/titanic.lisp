@@ -21,6 +21,16 @@
             (setf (aref res i) (aref (aref datum i) index)))
       res)))
 
+(defun df-retain (df tester)
+  (let ((datum (df-datum df)))
+    (make-dataframe
+      :label (df-label df)
+      :datum (coerce
+               (loop for row across datum
+                     when (funcall tester row)
+                     collect row)
+               'vector))))
+
 (defun df-string-to-integer (df label)
   (let* ((datum (df-datum df))
          (num-of-instances (length datum))
@@ -133,9 +143,67 @@
                         :datum (subseq data 1))
         (make-dataframe :datum data))))
 
+(defun make-naive-bayes-classifier (classes feature-labels feature-counts feature-likelihood class-counts class-likelihood)
+  (lambda (data)
+    (let ((result (make-hash-table :test #'equal)))
+      (dolist (class classes)
+        (loop for label in feature-labels
+              for value across data do
+              (format t "P(~A|~A=~A) = ~A/~A * ~A / ~A~%"
+                      class label value (gethash (cons class value) feature-counts)
+                      (gethash class class-counts)
+                      (gethash class class-likelihood)
+                      (gethash (cons label value) feature-likelihood))
+              (setf (gethash class result)
+                    (* (gethash class result 1)
+                       (/ (* (/ (gethash (cons class value) feature-counts)
+                                (gethash class class-counts))
+                             (gethash class class-likelihood))
+                          (gethash (cons label value) feature-likelihood))))))
+      (let ((infer nil)
+            (probabilities (list)))
+        (loop for key being each hash-key of result
+              using (hash-value value) do
+              (push (cons key value) probabilities))
+        (setf infer
+              (car (first (sort (copy-list probabilities) #'> :key #'cdr))))
+        (values infer probabilities)))))
+
+(defun naive-bayes-classifier (df class-index feature-labels)
+  (let* ((datum (df-datum df))
+         (class-index (df-index df class-index))
+         (num-of-instances (length datum))
+         (classes (list))
+         (feature-counts (make-hash-table :test #'equal))
+         (class-counts (make-hash-table :test #'equal))
+         (class-likelihood (make-hash-table :test #'equal))
+         (feature-likelihood (make-hash-table :test #'equal)))
+    (dolist (pair (counts (df-column df class-index)))
+      (let* ((class-value (car pair))
+             (class-count (cdr pair))
+             (class-contents (df-retain df (lambda (row) (equal class-value (aref row class-index))))))
+        (push class-value classes)
+        (setf (gethash class-value class-counts)
+              class-count)
+        (setf (gethash class-value class-likelihood)
+              (/ class-count num-of-instances))
+        (dolist (label feature-labels)
+          (dolist (fpair (counts (df-column class-contents label)))
+            (let* ((feature-value (car fpair))
+                   (feature-count (cdr fpair))
+                   (c-f (cons class-value feature-value))
+                   (l-f (cons label feature-value))
+                   (ratio (/ feature-count num-of-instances)))
+              (setf (gethash c-f feature-counts)
+                    feature-count
+                    (gethash l-f feature-likelihood)
+                    (+ (gethash l-f feature-likelihood 0) ratio)))))))
+    (make-naive-bayes-classifier classes feature-labels feature-counts feature-likelihood class-counts class-likelihood)))
+
 (let ((df (loadcsv +train-path+ :header t)))
   (df-type-conversion df '(int int int string string int int int string float string string))
   (terpri)
   (df-counts df)
-)
+  (let ((classify (naive-bayes-classifier df "Survived" '("Sex" "Age" "SibSp" "Parch"))))
+    (print (multiple-value-list (funcall classify #("male" 22 0 0))))))
 

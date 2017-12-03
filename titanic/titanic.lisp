@@ -1,6 +1,8 @@
 
 
 (defparameter +train-path+ "train.csv")
+(defparameter +test-path+ "test.csv")
+(defparameter +result-path+ "result.csv")
 
 (defstruct (dataframe (:conc-name df-))
   (label nil)
@@ -20,6 +22,26 @@
       (loop for i from 0 below num-of-instances do
             (setf (aref res i) (aref (aref datum i) index)))
       res)))
+
+(defun df-select (df labels)
+  (let* ((datum (df-datum df))
+         (num-of-instances (length datum))
+         (num-of-features (length labels))
+         (res (make-array num-of-instances))
+         (indices (make-array num-of-features)))
+    (loop for i from 0 below num-of-features do
+          (setf (aref indices i) (df-index df (aref labels i))))
+    (loop for i from 0 below num-of-instances
+          for row = (aref datum i)
+          for new-row = (make-array num-of-features) do
+          (loop for j from 0 below num-of-features do
+                (setf (aref new-row j)
+                      (aref row (aref indices j))))
+          (setf (aref res i)
+                new-row))
+    (make-dataframe
+      :label labels
+      :datum res)))
 
 (defun df-retain (df tester)
   (let ((datum (df-datum df)))
@@ -81,6 +103,15 @@
                 (sort counts #'> :key #'cdr)
                 (format t "~A~16T:~16T~A~16T~16T~A ~~~16T~A~%"
                         index diff (first counts) (car (last counts))))))))
+
+(defun df-predict (df predict)
+  (let* ((datum (df-datum df))
+         (num-of-instances (length datum))
+         (result (make-array num-of-instances)))
+    (loop for i from 0 below num-of-instances do
+          (setf (aref result i)
+                (funcall predict (aref datum i))))
+    result))
 
 (defun split (str delim)
   (let ((res (make-array 0 :element-type 'string
@@ -147,19 +178,22 @@
   (lambda (data)
     (let ((result (make-hash-table :test #'equal)))
       (dolist (class classes)
-        (loop for label in feature-labels
+        (loop for label across feature-labels
               for value across data do
-              (format t "P(~A|~A=~A) = ~A/~A * ~A / ~A~%"
-                      class label value (gethash (cons class value) feature-counts)
-                      (gethash class class-counts)
-                      (gethash class class-likelihood)
-                      (gethash (cons label value) feature-likelihood))
+
+;              (format t "P(~A|~A=~A) = ~A/~A * ~A / ~A~%"
+;                      class label value
+;                      (gethash (cons class value) feature-counts 0)
+;                      (gethash class class-counts)
+;                      (gethash class class-likelihood)
+;                      (gethash (cons label value) feature-likelihood))
+
               (setf (gethash class result)
                     (* (gethash class result 1)
-                       (/ (* (/ (gethash (cons class value) feature-counts)
+                       (/ (* (/ (gethash (cons class value) feature-counts 0)
                                 (gethash class class-counts))
                              (gethash class class-likelihood))
-                          (gethash (cons label value) feature-likelihood))))))
+                          (gethash (cons label value) feature-likelihood 1))))))
       (let ((infer nil)
             (probabilities (list)))
         (loop for key being each hash-key of result
@@ -187,7 +221,7 @@
               class-count)
         (setf (gethash class-value class-likelihood)
               (/ class-count num-of-instances))
-        (dolist (label feature-labels)
+        (loop for label across feature-labels do
           (dolist (fpair (counts (df-column class-contents label)))
             (let* ((feature-value (car fpair))
                    (feature-count (cdr fpair))
@@ -200,10 +234,42 @@
                     (+ (gethash l-f feature-likelihood 0) ratio)))))))
     (make-naive-bayes-classifier classes feature-labels feature-counts feature-likelihood class-counts class-likelihood)))
 
-(let ((df (loadcsv +train-path+ :header t)))
-  (df-type-conversion df '(int int int string string int int int string float string string))
+(defun print-array (stream array &optional (delim " "))
+  (let ((num-of-elements (length array)))
+    (princ (aref array 0) stream)
+    (loop for i from 1 below num-of-elements do
+          (format stream "~A~A" delim (aref array i)))))
+
+(let ((df (loadcsv +train-path+ :header t))
+      (test-df (loadcsv +test-path+ :header t)))
+  (df-type-conversion df '(int int int string string float int int string float string string))
+  (df-type-conversion test-df '(int int string string float int int string float string string))
   (terpri)
   (df-counts df)
-  (let ((classify (naive-bayes-classifier df "Survived" '("Sex" "Age" "SibSp" "Parch"))))
-    (print (multiple-value-list (funcall classify #("male" 22 0 0))))))
+  (let* ((datum (df-datum df))
+         (test-datum (df-datum test-df))
+         (train-survived (df-index df "Survived"))
+         (test-passenger-id (df-index test-df "PassengerId"))
+         (using-labels #("Sex" "Age" "SibSp" "Parch" "Cabin"))
+         (classify (naive-bayes-classifier df "Survived" using-labels))
+         (train-df (df-select df using-labels))
+         (train-results (df-predict train-df classify))
+         (using-test-df (df-select test-df using-labels))
+         (test-results (df-predict using-test-df classify))
+         (correct 0))
+    (loop for i from 0 below (length train-results) do
+          (if (equal (aref (aref datum i) train-survived)
+                     (aref train-results i))
+          (incf correct)))
+    (format t "Train correct ~A/~A(~4F)~%"
+            correct (length datum) (/ correct (length datum)))
+    (with-open-file (out +result-path+ :direction :output :if-exists :supersede)
+      (print-array out #("PassengerId" "Survived") ",")
+      (terpri out)
+      (loop for i from 0 below (length test-results) do
+            (format out "~A,~A~%"
+                    (aref (aref test-datum i) test-passenger-id)
+                    (aref test-results i))))
+    ))
+
 
